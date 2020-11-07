@@ -2,16 +2,16 @@
 
 namespace Afosto\Acme;
 
-use Afosto\Acme\Data\Account;
-use Afosto\Acme\Data\Authorization;
-use Afosto\Acme\Data\Certificate;
-use Afosto\Acme\Data\Challenge;
 use Afosto\Acme\Data\Order;
+use Afosto\Acme\Data\Account;
+use Afosto\Acme\Data\Challenge;
+use League\Flysystem\Filesystem;
+use Afosto\Acme\Data\Certificate;
+use Afosto\Acme\Data\Authorization;
 use GuzzleHttp\Client as HttpClient;
+use Psr\Http\Message\ResponseInterface;
 use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Exception\RequestException;
-use League\Flysystem\Filesystem;
-use Psr\Http\Message\ResponseInterface;
 
 class Client
 {
@@ -120,6 +120,8 @@ class Client
      * @type string $basePath The base path for the filesystem (used to store account information and csr / keys
      * @type string $username The acme username
      * @type string $source_ip The source IP for Guzzle (via curl.options) to bind to (defaults to 0.0.0.0 [OS default])
+     * @type string $key_type Specifies the type of private key to create (RSA or EC - defaults EC)
+     * @type string $key_size EC key size, possible values are 256 (prime256v1) or 384 (secp384r1), default is 256
      * }
      */
     public function __construct($config = [])
@@ -315,7 +317,10 @@ class Client
      */
     public function getCertificate(Order $order): Certificate
     {
-        $privateKey = Helper::getNewKey();
+        $privateKey = Helper::getNewKey(
+            $this->getOption('key_type', 'EC'),
+            $this->getOption('key_size', 256)
+        );
         $csr = Helper::getCsr($order->getDomains(), $privateKey);
         $der = Helper::toDer($csr);
 
@@ -498,7 +503,10 @@ class Client
     {
         //Make sure a private key is in place
         if ($this->getFilesystem()->has($this->getPath('account.pem')) === false) {
-            $this->getFilesystem()->write($this->getPath('account.pem'), Helper::getNewKey());
+            $this->getFilesystem()->write(
+                $this->getPath('account.pem'),
+                Helper::getNewKey('RSA')
+            );
         }
         $privateKey = $this->getFilesystem()->read($this->getPath('account.pem'));
         $privateKey = openssl_pkey_get_private($privateKey);
