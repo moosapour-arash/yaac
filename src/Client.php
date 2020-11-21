@@ -3,6 +3,7 @@
 namespace Afosto\Acme;
 
 use Afosto\Acme\Data\Order;
+use GuzzleHttp\Psr7\Header;
 use Afosto\Acme\Data\Account;
 use Afosto\Acme\Data\Challenge;
 use League\Flysystem\Filesystem;
@@ -324,6 +325,8 @@ class Client
         $csr = Helper::getCsr($order->getDomains(), $privateKey);
         $der = Helper::toDer($csr);
 
+        // TODO : should skip finalize if order status is `valid`, so we can get our previous certificates again
+
         $response = $this->request(
             $order->getFinalizeURL(),
             $this->signPayloadKid(
@@ -337,8 +340,34 @@ class Client
             $data['certificate'],
             $this->signPayloadKid(null, $data['certificate'])
         );
-        $chain = $str = preg_replace('/^[ \t]*[\r\n]+/m', '', (string)$certificateResponse->getBody());
-        return new Certificate($privateKey, $csr, $chain);
+        $originalCertificate  = $this->makeCertificate($privateKey, $csr, (string)$certificateResponse->getBody());
+        if(null !== $preferredChain = $this->getOption('preferred_chain', null)) {
+            $parsedIntermediate = openssl_x509_parse($originalCertificate->getIntermediate());
+            if(isset($parsedIntermediate['issuer']['CN'])
+                && $preferredChain !== $parsedIntermediate['issuer']['CN']) {
+                $links = $certificateResponse->getHeader('link');
+                if (count($links) > 0) {
+                    foreach ($links as $link) {
+                        $parsed = Header::parse($link);
+                        if(isset($parsed[0][0]) && isset($parsed[0]['rel']) && 'alternate' === $parsed[0]['rel']) {
+                            $alternateCert = trim($parsed[0][0], '<>');
+                            $certificateResponse = $this->request(
+                                $alternateCert,
+                                $this->signPayloadKid(null, $alternateCert)
+                            );
+                            $alternativeCertificate  = $this->makeCertificate($privateKey, $csr, (string)$certificateResponse->getBody());
+                            $parsedIntermediate = openssl_x509_parse($alternativeCertificate->getIntermediate());
+                            if (isset($parsedIntermediate['issuer']['CN']) && $preferredChain === $parsedIntermediate['issuer']['CN']) {
+                                return $alternativeCertificate;
+                            }
+                            //TODO : Log : although preferred "issuer" is provided but we could not find any, so we stick to default cert provided
+                        }
+                    }
+                }
+            }
+        }
+
+        return $originalCertificate;
     }
 
 
@@ -545,9 +574,9 @@ class Client
         $userDirectory = preg_replace('/[^a-z0-9]+/', '-', strtolower($this->getOption('username')));
 
         return $this->getOption(
-            'basePath',
-            'le'
-        ) . DIRECTORY_SEPARATOR . $userDirectory . ($path === null ? '' : DIRECTORY_SEPARATOR . $path);
+                'basePath',
+                'le'
+            ) . DIRECTORY_SEPARATOR . $userDirectory . ($path === null ? '' : DIRECTORY_SEPARATOR . $path);
     }
 
     /**
@@ -762,5 +791,20 @@ class Client
             'payload'   => $payload,
             'signature' => Helper::toSafeString($signature),
         ];
+    }
+
+    /**
+     * @param        $privateKey
+     * @param        $csr
+     * @param string $certificateResponse
+     *
+     * @return \Afosto\Acme\Data\Certificate
+     * @throws \Exception
+     */
+    private function makeCertificate($privateKey, $csr, string $certificateResponse)
+    {
+        $chain = preg_replace('/^[ \t]*[\r\n]+/m', '', $certificateResponse);
+        return new Certificate($privateKey, $csr, $chain);
+
     }
 }
